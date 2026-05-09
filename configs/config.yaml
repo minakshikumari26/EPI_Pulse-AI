@@ -1,0 +1,76 @@
+app:
+  name: EpiPulse AI
+  environment: development
+
+data:
+  disease_data_path: data/disease_data.csv
+
+api:
+  host: 0.0.0.0
+  port: 8000
+
+dashboard:
+  port: 8501
+
+database:
+  url: postgresql://postgres:password@db:5432/epipulse
+
+logging:
+  level: INFO
+  file_path: logs/app.log
+  max_bytes: 1048576
+  backup_count: 3
+
+anomaly_detection:
+  z_score_threshold: 1.5
+  isolation_forest_contamination: 0.08
+
+risk_scoring:
+  weights:
+    cases: 60
+    humidity: 25
+    rainfall: 15
+  levels:
+    high: 70
+    medium: 40
+
+forecasting:
+  periods: 7
+  arima_order: [1, 1, 1]
+
+alerting:
+  high_risk_score: 70
+  medium_risk_score: 40
+  spike_z_score: 1.5
+  growth_rate_warning: 0.2
+
+kafka:
+  bootstrap_servers: localhost:9094
+  topic: disease-events
+
+mlflow:
+  experiment_name: EpiPulse Forecasting
+
+llm:
+  enabled: true
+  ollama_url: http://localhost:11435
+  model: llama3.2:1b
+  model_fallbacks:
+    - llama3.2:1b
+    - mistral:latest
+    - mistral
+  timeout: 60
+  temperature: 0.7
+
+geospatial:
+  map_center: [22.9734, 78.6569]
+  map_zoom: 5
+  region_coordinates:
+    Delhi: [28.6139, 77.2090]
+    Mumbai: [19.0760, 72.8777]
+    Bengaluru: [12.9716, 77.5946]
+    Chennai: [13.0827, 80.2707]
+    Kolkata: [22.5726, 88.3639]
+    Hyderabad: [17.3850, 78.4867]
+    Ahmedabad: [23.0225, 72.5714]
+    Pune: [18.5204, 73.8567]

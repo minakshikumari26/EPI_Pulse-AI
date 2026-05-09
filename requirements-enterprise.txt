@@ -1,0 +1,7 @@
+-r requirements.txt
+tensorflow
+mlflow
+apache-airflow
+kafka-python
+redis
+geopandas
