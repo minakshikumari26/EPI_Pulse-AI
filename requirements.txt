@@ -16,3 +16,8 @@ pyyaml
 python-dotenv
 requests
 prometheus-client
+groq
+# RAG dependencies
+chromadb
+sentence-transformers
+pypdf

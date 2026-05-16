@@ -53,14 +53,33 @@ mlflow:
 
 llm:
   enabled: true
-  ollama_url: http://localhost:11435
-  model: llama3.2:1b
-  model_fallbacks:
-    - llama3.2:1b
-    - mistral:latest
-    - mistral
+
+  # ─── Provider selection ───────────────────────────────────────────
+  # Options: "groq" (recommended, free) | "ollama" (local, no internet)
+  # Can also be overridden by LLM_PROVIDER env variable
+  provider: groq
+
+  # ─── Groq settings (used when provider = groq) ───────────────────
+  # Get your free API key at: https://console.groq.com
+  # Set GROQ_API_KEY in your .env file (don't paste the key here)
+  groq_api_key: ""
+  model:  llama-3.1-8b-instant
+  # Alternatives:
+  #   llama3-70b-8192        (smarter, slower)
+  #   llama-3.1-8b-instant   (fastest)
+  #   mixtral-8x7b-32768     (good for long context)
+  #   gemma2-9b-it           (Google model via Groq)
+
+  # ─── Ollama settings (used when provider = ollama) ───────────────
+  ollama_url: http://localhost:11434
+  ollama_model: llama3.2:1b
+
+  # ─── Shared settings ─────────────────────────────────────────────
   timeout: 60
   temperature: 0.7
+  model_fallbacks:
+    - llama3-8b-8192
+    - llama-3.1-8b-instant
 
 geospatial:
   map_center: [22.9734, 78.6569]
