@@ -69,8 +69,11 @@ def load_uploaded(file) -> pd.DataFrame:
 
 def _enrich(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["date"] = pd.to_datetime(df["date"], infer_datetime_format=True, errors="coerce")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"]).drop_duplicates()
+    if df.empty:
+        st.error("No valid dates found in the dataset.")
+        st.stop()
     df = df.sort_values(["region","date"]).reset_index(drop=True)
     for col in ["temperature","humidity","rainfall"]:
         if col not in df.columns: df[col] = 0.0
