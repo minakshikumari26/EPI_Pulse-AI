@@ -23,3 +23,9 @@ mlruns/
 airflow_home/
 kafka-logs/
 *.db
+
+data/rag_db/
+__pycache__/
+*.pyc
+.DS_Store
+logs/

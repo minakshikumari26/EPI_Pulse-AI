@@ -1,4 +1,4 @@
-"""EpiPulse AI — Chat Interface (Fixed: cross-regional risk, rich LLM context)."""
+"""EpiPulse AI — RAG-Powered Chat Interface."""
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -7,11 +7,10 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from scipy.stats import zscore as scipy_zscore
-
-import plotly.express as px
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -23,41 +22,45 @@ from src.utils.config import load_config
 DATA_PATH = PROJECT_ROOT / "data" / "disease_data.csv"
 
 
+# ── CSS ───────────────────────────────────────────────────────────────────────
 def inject_css():
     st.markdown("""
     <style>
     .main-header{background:linear-gradient(135deg,#1e3a8a 0%,#0ea5e9 100%);
-        color:white;padding:2rem;border-radius:10px;margin-bottom:2rem;
-        box-shadow:0 4px 6px rgba(0,0,0,.1)}
-    .main-header h1{margin:0;font-size:2.5rem;font-weight:800}
-    .main-header p{margin:.5rem 0 0 0;font-size:1.1rem;opacity:.9}
+        color:white;padding:2rem;border-radius:10px;margin-bottom:2rem}
+    .main-header h1{margin:0;font-size:2.3rem;font-weight:800}
+    .main-header p{margin:.4rem 0 0;font-size:1rem;opacity:.9}
     .status-card{background:white;border-left:4px solid #0ea5e9;
-        padding:1.5rem;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.05);
-        margin-bottom:1rem}
+        padding:1rem 1.2rem;border-radius:8px;margin-bottom:.8rem}
     .status-card.success{border-left-color:#10b981}
     .status-card.warning{border-left-color:#f59e0b}
     .status-card.danger {border-left-color:#ef4444}
-    .stButton>button{background:linear-gradient(135deg,#1e3a8a 0%,#0ea5e9 100%);
-        color:white;border:none;border-radius:6px;
-        padding:.5rem 1.5rem;font-weight:600;transition:all .3s ease}
+    .rag-badge{background:#f0fdf4;border:1px solid #86efac;border-radius:6px;
+        padding:.2rem .6rem;font-size:.8rem;color:#166534;font-weight:600;display:inline-block}
+    .citation-box{background:#f8fafc;border-left:3px solid #0891b2;
+        padding:.6rem .9rem;border-radius:4px;font-size:.82rem;color:#334155;margin-top:.5rem}
     .context-pill{background:#f0f9ff;border:1px solid #bae6fd;border-radius:20px;
-        padding:.3rem .9rem;font-size:.85rem;color:#0369a1;font-weight:600;
-        display:inline-block;margin:.2rem}
-    .risk-high  {color:#991b1b;font-weight:700}
-    .risk-medium{color:#92400e;font-weight:700}
-    .risk-low   {color:#14532d;font-weight:700}
+        padding:.2rem .7rem;font-size:.82rem;color:#0369a1;font-weight:600;
+        display:inline-block;margin:.15rem}
+    .stButton>button{background:linear-gradient(135deg,#1e3a8a 0%,#0ea5e9 100%);
+        color:white;border:none;border-radius:6px;padding:.45rem 1.3rem;font-weight:600}
+    .kb-stat{background:#eff6ff;border-radius:8px;padding:.7rem 1rem;
+        border:1px solid #bfdbfe;font-size:.88rem;color:#1e40af}
     </style>""", unsafe_allow_html=True)
 
 
 # ── Data ───────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Loading data...")
+@st.cache_data(show_spinner="Loading data...", ttl=300)
 def load_data() -> pd.DataFrame:
-    df = pd.read_csv(DATA_PATH, parse_dates=["date"])
-    return _enrich(df)
+    try:
+        df = pd.read_csv(DATA_PATH)
+        return _enrich(df)
+    except FileNotFoundError:
+        st.error("❌ Run `python scripts/generate_dataset.py` first."); st.stop()
 
 
 def load_uploaded(file) -> pd.DataFrame:
-    df = pd.read_csv(file, parse_dates=["date"])
+    df = pd.read_csv(file)
     missing = {"date","region","cases"} - set(df.columns)
     if missing:
         st.error(f"❌ Missing columns: {missing}"); st.stop()
@@ -65,486 +68,492 @@ def load_uploaded(file) -> pd.DataFrame:
 
 
 def _enrich(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.drop_duplicates().sort_values(["region","date"]).reset_index(drop=True)
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], infer_datetime_format=True, errors="coerce")
+    df = df.dropna(subset=["date"]).drop_duplicates()
+    df = df.sort_values(["region","date"]).reset_index(drop=True)
     for col in ["temperature","humidity","rainfall"]:
         if col not in df.columns: df[col] = 0.0
-        df[col] = df[col].fillna(df[col].mean())
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     if "disease" not in df.columns: df["disease"] = "Unknown"
     if "year"    not in df.columns: df["year"]    = df["date"].dt.year
-    df["cases"] = df["cases"].fillna(0).astype(int)
-
-    # Z-score within region+disease (anomaly vs own baseline)
+    df["cases"]   = pd.to_numeric(df["cases"], errors="coerce").fillna(0).astype(int)
     df["z_score"] = df.groupby(["region","disease"])["cases"].transform(
-        lambda v: scipy_zscore(v) if len(v) > 1 else 0
-    )
+        lambda v: scipy_zscore(v) if len(v) > 1 else 0)
     df["is_spike"] = df["z_score"] > 1.5
-
-    # Risk score: CROSS-REGIONAL using global min/max
     for col in ["cases","humidity","rainfall"]:
         g_min, g_max = df[col].min(), df[col].max()
-        denom = g_max - g_min if g_max > g_min else 1
-        df[f"{col}_scaled"] = (df[col] - g_min) / denom
-
-    df["risk_score"] = (
-        df["cases_scaled"] * 60 +
-        df["humidity_scaled"] * 25 +
-        df["rainfall_scaled"] * 15
-    ).round(3)
+        df[f"{col}_scaled"] = (df[col] - g_min) / (g_max - g_min if g_max > g_min else 1)
+    df["risk_score"] = (df["cases_scaled"]*60 + df["humidity_scaled"]*25 + df["rainfall_scaled"]*15).round(4)
+    h_t = df["risk_score"].quantile(0.75)
+    m_t = df["risk_score"].quantile(0.40)
     df["risk_level"] = df["risk_score"].apply(
-        lambda s: "High" if s >= 0.55 else "Medium" if s >= 0.25 else "Low"
-    )
+        lambda s: "High" if s >= h_t else "Medium" if s >= m_t else "Low")
     return df
 
 
-def get_rich_context(df: pd.DataFrame, region: str, disease: str, year) -> dict:
-    """Build rich, specific context for the LLM — actual numbers, comparisons, trends."""
-    mask = (df["region"] == region) & (df["disease"] == disease)
-    if year != "All":
-        mask = mask & (df["year"] == int(year))
+def get_rich_context(df, region, disease, year, conversation_history=None):
+    mask = (df["region"]==region) & (df["disease"]==disease)
+    if year != "All": mask = mask & (df["year"]==int(year))
     rdf = df[mask].sort_values("date")
-
     if rdf.empty:
-        return {"region": region, "disease": disease, "error": "No data for this selection"}
-
-    latest      = rdf.iloc[-1]
-    last_7      = rdf.tail(7)
-    last_30     = rdf.tail(30)
-    prev_7      = rdf.iloc[-14:-7] if len(rdf) >= 14 else rdf.iloc[:-7]
-
-    avg_7d      = float(last_7["cases"].mean())
-    avg_prev_7d = float(prev_7["cases"].mean()) if not prev_7.empty else avg_7d
-    growth_rate = (avg_7d - avg_prev_7d) / avg_prev_7d if avg_prev_7d > 0 else 0
-    trend_dir   = "📈 Rising" if growth_rate > 0.05 else "📉 Falling" if growth_rate < -0.05 else "➡️ Stable"
-
-    # Cross-regional comparison
-    all_latest = df.groupby(["region","disease"]).last().reset_index()
-    dis_latest = all_latest[all_latest["disease"] == disease].sort_values("cases", ascending=False)
-    rank        = int((dis_latest["region"] == region).argmax()) + 1
-    total_r     = len(dis_latest)
-
-    # Global avg for this disease
-    global_avg = float(dis_latest["cases"].mean())
-    vs_global  = ((float(latest["cases"]) - global_avg) / global_avg * 100) if global_avg > 0 else 0
-
-    return {
-        "region":             region,
-        "disease":            disease,
-        "year_filter":        str(year),
-        "latest_date":        latest["date"].strftime("%Y-%m-%d"),
-        "latest_cases":       int(latest["cases"]),
-        "latest_risk_score":  float(latest["risk_score"]),
-        "latest_risk_level":  latest["risk_level"],
-        "latest_z_score":     round(float(latest["z_score"]), 2),
-        "is_spike_today":     bool(latest["is_spike"]),
-        "avg_7d_cases":       round(avg_7d, 1),
-        "avg_prev_7d_cases":  round(avg_prev_7d, 1),
-        "growth_rate_pct":    round(growth_rate * 100, 1),
-        "trend_direction":    trend_dir,
-        "peak_cases_period":  int(rdf["cases"].max()),
-        "total_cases_period": int(rdf["cases"].sum()),
-        "spike_days":         int(rdf["is_spike"].sum()),
-        "avg_temperature":    round(float(rdf["temperature"].mean()), 1),
-        "avg_humidity":       round(float(rdf["humidity"].mean()), 1),
-        "rank_among_regions": f"{rank} of {total_r} (1=highest burden)",
-        "vs_national_avg_pct":round(vs_global, 1),
-        "national_avg_cases": round(global_avg, 1),
-        "top_3_regions":      dis_latest.head(3)["region"].tolist(),
-        "bottom_3_regions":   dis_latest.tail(3)["region"].tolist(),
+        return {"region":region,"disease":disease,"note":"No data"}
+    latest  = rdf.iloc[-1]
+    last7   = rdf.tail(7)
+    prev7   = rdf.iloc[-14:-7] if len(rdf)>=14 else rdf.head(7)
+    avg7    = float(last7["cases"].mean())
+    avgp7   = float(prev7["cases"].mean()) if not prev7.empty else avg7
+    growth  = (avg7-avgp7)/avgp7 if avgp7>0 else 0
+    all_lat = df.groupby(["region","disease"]).last().reset_index()
+    dis_lat = all_lat[all_lat["disease"]==disease].sort_values("cases",ascending=False)
+    rank    = int(dis_lat[dis_lat["region"]==region].index[0] - dis_lat.index[0]+1) if region in dis_lat["region"].values else "N/A"
+    g_avg   = float(dis_lat["cases"].mean())
+    vs_g    = ((float(latest["cases"])-g_avg)/g_avg*100) if g_avg>0 else 0
+    ctx = {
+        "region":region,"disease":disease,"year_filter":str(year),
+        "latest_date":latest["date"].strftime("%Y-%m-%d"),
+        "latest_cases":int(latest["cases"]),"risk_score":round(float(latest["risk_score"]),4),
+        "risk_level":latest["risk_level"],"z_score":round(float(latest["z_score"]),2),
+        "is_spike":bool(latest["is_spike"]),
+        "last_7_days_cases":last7["cases"].tolist(),
+        "last_7_days_dates":last7["date"].dt.strftime("%Y-%m-%d").tolist(),
+        "avg_7d":round(avg7,1),"avg_prev_7d":round(avgp7,1),
+        "growth_rate_pct":round(growth*100,1),
+        "trend":"Rising" if growth>0.05 else "Falling" if growth<-0.05 else "Stable",
+        "peak_cases":int(rdf["cases"].max()),"total_cases":int(rdf["cases"].sum()),
+        "spike_days":int(rdf["is_spike"].sum()),
+        "avg_temp":round(float(rdf["temperature"].mean()),1),
+        "avg_humidity":round(float(rdf["humidity"].mean()),1),
+        "rank_of_total":f"{rank} of {len(dis_lat)}",
+        "vs_national_avg_pct":round(vs_g,1),"national_avg_cases":round(g_avg,1),
+        "top_3_regions":dis_lat.head(3)["region"].tolist(),
+        "available_regions":sorted(df["region"].unique().tolist()),
+        "available_diseases":sorted(df["disease"].unique().tolist()),
     }
+    if conversation_history:
+        ctx["conversation_history"] = [
+            {"role":m["role"],"content":m["content"][:250]}
+            for m in conversation_history[-6:]
+        ]
+    return ctx
 
 
 def plot_trend(df, region, disease):
     rdf = df[(df["region"]==region)&(df["disease"]==disease)].sort_values("date")
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=rdf["date"], y=rdf["cases"],
-                              mode="lines+markers", name="Cases",
-                              line=dict(color="#0ea5e9",width=3),
-                              fill="tozeroy", fillcolor="rgba(14,165,233,.1)"))
+    fig.add_trace(go.Scatter(x=rdf["date"],y=rdf["cases"],mode="lines+markers",
+        line=dict(color="#0ea5e9",width=2),fill="tozeroy",
+        fillcolor="rgba(14,165,233,.08)",name="Cases"))
     spikes = rdf[rdf["is_spike"]]
     if not spikes.empty:
-        fig.add_trace(go.Scatter(x=spikes["date"], y=spikes["cases"],
-                                  mode="markers", name="Spike",
-                                  marker=dict(size=10,color="#ef4444",symbol="x")))
-    fig.update_layout(title=f"{region} — {disease}",
-                      xaxis_title="Date", yaxis_title="Cases",
-                      template="plotly_white", height=260,
-                      margin=dict(l=0,r=0,t=30,b=0))
+        fig.add_trace(go.Scatter(x=spikes["date"],y=spikes["cases"],mode="markers",
+            marker=dict(size=9,color="#ef4444",symbol="x"),name="Spike"))
+    fig.update_layout(height=240,margin=dict(l=0,r=0,t=20,b=0),
+        title=f"{region} — {disease}",template="plotly_white",
+        xaxis_title=None,yaxis_title="Cases")
     return fig
 
 
-def risk_css_class(level):
-    return {"High":"risk-high","Medium":"risk-medium","Low":"risk-low"}.get(level,"risk-low")
+# ── RAG init (cached) ─────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner="Loading RAG knowledge base...")
+def init_rag():
+    """Initialize RAG knowledge base and retriever (cached across sessions)."""
+    try:
+        from src.rag.knowledge_base import get_knowledge_base
+        from src.rag.retriever import RAGRetriever
+        kb  = get_knowledge_base(auto_seed=True)
+        rag = RAGRetriever(knowledge_base=kb)
+        return rag, None
+    except Exception as e:
+        return None, str(e)
+
+
+def display_citations(chunks: list[dict]):
+    """Render retrieved source citations in an expander."""
+    if not chunks:
+        return
+    with st.expander(f"📚 Sources ({len(chunks)} retrieved)", expanded=False):
+        for i, c in enumerate(chunks):
+            st.markdown(f"""
+<div class="citation-box">
+<strong>[{i+1}] {c['source']}</strong>
+<span style="color:#64748b;font-size:.78rem"> — relevance: {c['score']:.0%}</span><br>
+<em style="font-size:.82rem">{c['text'][:280]}{'...' if len(c['text'])>280 else ''}</em>
+</div>""", unsafe_allow_html=True)
 
 
 def main():
-    st.set_page_config(page_title="EpiPulse AI Chat", layout="wide",
-                       initial_sidebar_state="expanded")
+    st.set_page_config(page_title="EpiPulse AI — RAG Chat",
+                       layout="wide", initial_sidebar_state="expanded")
     inject_css()
 
     st.markdown("""
     <div class="main-header">
         <h1>🩺 EpiPulse AI</h1>
-        <p>AI-Powered Disease Outbreak Intelligence & Analysis</p>
+        <p>RAG-Powered Disease Outbreak Intelligence — grounded in WHO guidelines & IDSP protocols</p>
     </div>""", unsafe_allow_html=True)
 
-    # ── LLM ───────────────────────────────────────────────────────────────────
+    # ── LLM ──────────────────────────────────────────────────────────────────
     try:
         config = load_config()
-        if not config.get("llm", {}).get("enabled", False):
-            st.error("⚠️ LLM disabled — set `enabled: true` in configs/config.yaml"); return
+        if not config.get("llm",{}).get("enabled",False):
+            st.error("⚠️ Set `enabled: true` in configs/config.yaml"); return
         llm            = get_llm_client()
         provider_label = "Groq ☁️" if "groq" in str(type(llm)).lower() else "Ollama 🖥️"
-        conn_status    = f"✅ Connected to **{llm.model}** on `{llm.base_url}`"
-        avail_models   = getattr(llm, "available_models", [])
-    except (ConnectionError, ValueError) as e:
+        conn_status    = f"✅ Connected to **{llm.model}**"
+    except (ConnectionError,ValueError) as e:
         err = str(e)
         if "GROQ_API_KEY" in err or "groq" in err.lower():
-            st.error("❌ **Groq API key missing.**\n\n"
-                     "1. https://console.groq.com → free key\n"
-                     "2. Add `GROQ_API_KEY=gsk_...` to `.env`\n3. Restart")
+            st.error("❌ Add `GROQ_API_KEY=gsk_...` to your `.env` file")
         else:
-            st.error(f"❌ Cannot connect: {err}")
+            st.error(f"❌ LLM error: {err}")
         return
     except Exception as e:
-        st.error(f"❌ LLM init error: `{e}`"); return
+        st.error(f"❌ LLM init: `{e}`"); return
 
-    # ── Sidebar ────────────────────────────────────────────────────────────────
+    # ── RAG ──────────────────────────────────────────────────────────────────
+    rag, rag_error = init_rag()
+    rag_ready = rag is not None
+
+    # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
-        # Data source
         st.markdown("## 📂 Data Source")
-        src = st.radio("src", ["📊 Built-in","📁 Upload CSV"], label_visibility="collapsed")
+        src = st.radio("src",["📊 Built-in","📁 Upload CSV"],label_visibility="collapsed")
         if src == "📁 Upload CSV":
-            up = st.file_uploader("CSV: date, region, cases", type=["csv"])
+            up = st.file_uploader("CSV: date, region, cases",type=["csv"])
             df = load_uploaded(up) if up else (st.info("Using built-in."), load_data())[1]
         else:
             df = load_data()
 
         st.markdown("---\n## 🔍 Filters")
+        diseases    = sorted(df["disease"].unique())
+        multi_d     = len(diseases)>1
+        sel_disease = st.selectbox("🦠 Disease",diseases) if multi_d else diseases[0]
+        years       = sorted(df["year"].unique(),reverse=True)
+        sel_year    = st.selectbox("📅 Year",["All"]+[str(y) for y in years])
+        regions     = sorted(df["region"].unique())
+        sel_region  = st.selectbox("🗺️ Region",regions)
 
-        diseases     = sorted(df["disease"].unique())
-        multi_d      = len(diseases) > 1
-        sel_disease  = st.selectbox("🦠 Disease", diseases) if multi_d else diseases[0]
-
-        years        = sorted(df["year"].unique(), reverse=True)
-        sel_year     = st.selectbox("📅 Year", ["All"] + [str(y) for y in years])
-
-        regions      = sorted(df["region"].unique())
-        sel_region   = st.selectbox("🗺️ Region", regions)
-
-        # Apply year filter for display
         disp_df = df.copy()
         if sel_year != "All":
-            disp_df = disp_df[disp_df["year"] == int(sel_year)]
+            disp_df = disp_df[disp_df["year"]==int(sel_year)]
 
         st.markdown("---")
 
         # LLM status
         st.markdown(f"""
         <div class="status-card success">
-            <div style="font-weight:600;margin-bottom:.5rem">🔌 LLM</div>
-            <div>{conn_status}</div>
-            <div style="margin-top:.3rem;font-size:.83rem;color:#6b7280">Provider: {provider_label}</div>
+            <div style="font-weight:600;margin-bottom:.4rem">🔌 LLM — {provider_label}</div>
+            <div style="font-size:.9rem">{conn_status}</div>
         </div>""", unsafe_allow_html=True)
-        if avail_models:
-            st.caption("Models: " + ", ".join(avail_models[:4]))
+
+        # RAG status
+        if rag_ready:
+            stats = rag.get_kb_stats()
+            st.markdown(f"""
+            <div class="status-card success">
+                <div style="font-weight:600;margin-bottom:.4rem">🧠 RAG Knowledge Base</div>
+                <div class="rag-badge">✅ Active</div>
+                <div style="font-size:.85rem;margin-top:.5rem;color:#374151">
+                    📄 <strong>{stats['total_chunks']}</strong> chunks indexed<br>
+                    📚 <strong>{len(stats['sources'])}</strong> sources
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+            with st.expander("📚 View sources"):
+                for src_name in stats["sources"]:
+                    st.markdown(f"• {src_name}")
+        else:
+            st.markdown(f"""
+            <div class="status-card warning">
+                <div style="font-weight:600">⚠️ RAG Unavailable</div>
+                <div style="font-size:.85rem">{rag_error}</div>
+            </div>""", unsafe_allow_html=True)
+
+        # Upload documents to knowledge base
+        if rag_ready:
+            st.markdown("---\n## 📤 Add to Knowledge Base")
+            doc_upload = st.file_uploader(
+                "Upload PDF/TXT to knowledge base",
+                type=["pdf","txt","md"],
+                help="WHO reports, IDSP bulletins, research papers — any health document",
+                key="kb_upload",
+            )
+            if doc_upload:
+                if st.button("📥 Index Document"):
+                    with st.spinner("Indexing..."):
+                        try:
+                            n = rag.kb.add_uploaded_file(
+                                doc_upload, doc_upload.name,
+                                source=doc_upload.name.replace("_"," ").replace("-"," ").split(".")[0]
+                            )
+                            st.success(f"✅ Added {n} chunks from '{doc_upload.name}'")
+                            st.cache_resource.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to index: {e}")
+
         if st.button("🔄 Reconnect LLM"):
             try:
                 from src.llm import get_llm_client as _g
-                llm = _g(force_new=True); st.success("✅ Reconnected!"); st.rerun()
+                _g(force_new=True); st.success("✅ Reconnected!"); st.rerun()
             except Exception as _e:
                 st.error(f"Failed: {_e}")
 
         # Regional snapshot
         st.markdown("---")
         ctx = get_rich_context(disp_df, sel_region, sel_disease, sel_year)
-
-        if "error" not in ctx:
-            risk_cls = risk_css_class(ctx["latest_risk_level"])
+        if "note" not in ctx:
+            rl  = ctx["risk_level"]
+            css = {"High":"danger","Medium":"warning","Low":"success"}.get(rl,"success")
             st.markdown(f"#### {sel_region} · {sel_disease}")
             st.markdown(f"""
-            <div class="status-card {'danger' if ctx['latest_risk_level']=='High' else 'warning' if ctx['latest_risk_level']=='Medium' else 'success'}">
-                <div class="{risk_cls}" style="font-size:1.2rem">
-                    {'🔴 HIGH RISK' if ctx['latest_risk_level']=='High' else '🟠 MEDIUM RISK' if ctx['latest_risk_level']=='Medium' else '🟢 LOW RISK'}
+            <div class="status-card {css}">
+                <div style="font-size:1.1rem;font-weight:700">
+                    {'🔴 HIGH' if rl=='High' else '🟠 MEDIUM' if rl=='Medium' else '🟢 LOW'} RISK
                 </div>
-                <div style="font-size:.85rem;margin-top:.4rem;color:#374151">
-                    {ctx['trend_direction']} · {ctx['growth_rate_pct']:+.1f}% vs prev week
+                <div style="font-size:.83rem;margin-top:.3rem;color:#374151">
+                    {ctx['trend']} · {ctx['growth_rate_pct']:+.1f}% vs prev week
                 </div>
             </div>""", unsafe_allow_html=True)
-
-            c1, c2 = st.columns(2)
-            with c1:
-                st.metric("Cases Today", f"{ctx['latest_cases']:,}")
-                st.metric("7d Avg",      f"{ctx['avg_7d_cases']:.0f}")
-            with c2:
-                st.metric("Z-Score",     f"{ctx['latest_z_score']:.2f}")
-                st.metric("Rank",        ctx['rank_among_regions'])
-
-            if ctx.get("vs_national_avg_pct") is not None:
-                delta_color = "inverse" if ctx["vs_national_avg_pct"] > 0 else "normal"
-                st.metric("vs National Avg",
-                          f"{ctx['vs_national_avg_pct']:+.1f}%",
-                          delta=f"Nat avg: {ctx['national_avg_cases']:.0f}",
-                          delta_color=delta_color)
-
-            if ctx["is_spike_today"]:
-                st.error("🚨 Active outbreak spike detected!")
-            if ctx["spike_days"] > 0:
-                st.warning(f"⚠️ {ctx['spike_days']} spike days in selected period")
-
+            c1,c2 = st.columns(2)
+            with c1: st.metric("Cases",f"{ctx['latest_cases']:,}"); st.metric("Z-Score",f"{ctx['z_score']:.2f}")
+            with c2: st.metric("7d Avg",f"{ctx['avg_7d']:.0f}"); st.metric("Rank",ctx["rank_of_total"])
+            if ctx["is_spike"]: st.error("🚨 Active spike!")
             st.markdown("---")
-            st.plotly_chart(plot_trend(disp_df, sel_region, sel_disease),
-                            use_container_width=True)
+            st.plotly_chart(plot_trend(disp_df,sel_region,sel_disease),use_container_width=True)
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3 = st.tabs(["💬 Chat", "📊 Analysis", "⚙️ Tools"])
+    tab1, tab2, tab3 = st.tabs(["💬 Chat","📊 Analysis","⚙️ Tools"])
 
-    # ── TAB 1: CHAT ───────────────────────────────────────────────────────────
+    # ── TAB 1: RAG CHAT ───────────────────────────────────────────────────────
     with tab1:
-        yr_note = f" ({sel_year})" if sel_year != "All" else " (all years)"
-
         # Context pills
-        ctx_pills = [f"📍 {sel_region}", f"🦠 {sel_disease}", f"📅 {sel_year}"]
-        if "error" not in ctx:
-            ctx_pills.append(f"📊 {ctx['latest_cases']} cases today")
-            ctx_pills.append(f"{'🔴' if ctx['latest_risk_level']=='High' else '🟠' if ctx['latest_risk_level']=='Medium' else '🟢'} {ctx['latest_risk_level']} risk")
-            ctx_pills.append(ctx["trend_direction"])
+        ctx = get_rich_context(disp_df, sel_region, sel_disease, sel_year)
+        pills = [f"📍 {sel_region}", f"🦠 {sel_disease}", f"📅 {sel_year}"]
+        if "note" not in ctx:
+            pills += [
+                f"📊 {ctx['latest_cases']} cases",
+                f"{'🔴' if ctx['risk_level']=='High' else '🟠' if ctx['risk_level']=='Medium' else '🟢'} {ctx['risk_level']}",
+                ctx["trend"],
+            ]
+        if rag_ready:
+            pills.append("🧠 RAG Active")
 
         st.markdown(
-            " ".join(f'<span class="context-pill">{p}</span>' for p in ctx_pills),
-            unsafe_allow_html=True
-        )
+            " ".join(f'<span class="context-pill">{p}</span>' for p in pills),
+            unsafe_allow_html=True)
         st.markdown("")
 
+        # Init messages
         if "messages" not in st.session_state:
-            region_list  = ", ".join(regions[:6]) + ("…" if len(regions) > 6 else "")
-            disease_list = ", ".join(diseases)
-            yr_list      = f"{min(years)}–{max(years)}"
-
-            if "error" not in ctx:
-                intro = (
-                    f"👋 Hello! I'm your AI epidemiologist.\n\n"
-                    f"**Currently analysing:** {sel_region} → {sel_disease}{yr_note}\n\n"
+            kb_note = (f"grounded in **{rag.get_kb_stats()['total_chunks']} chunks** "
+                       f"from {len(rag.get_kb_stats()['sources'])} sources "
+                       f"(WHO guidelines, IDSP protocols)"
+                       if rag_ready else "LLM-only mode (RAG unavailable)")
+            intro = (
+                f"👋 Hello! I'm your AI epidemiologist — {kb_note}.\n\n"
+                f"**Currently watching:** {sel_region} → {sel_disease} ({sel_year})\n\n"
+            )
+            if "note" not in ctx:
+                intro += (
                     f"Here's what I see right now:\n"
                     f"- **{ctx['latest_cases']:,} cases** as of {ctx['latest_date']}\n"
-                    f"- **{ctx['latest_risk_level']} risk** (score: {ctx['latest_risk_score']:.3f})\n"
-                    f"- **{ctx['trend_direction']}** — {ctx['growth_rate_pct']:+.1f}% vs last week\n"
-                    f"- Ranked **{ctx['rank_among_regions']}** for {sel_disease}\n"
-                    f"- **{ctx['spike_days']} spike days** in selected period\n\n"
-                    f"**Data covers:** {region_list} · {disease_list} · {yr_list}\n\n"
-                    f"Ask me anything — cases, risk levels, comparisons, trends or intervention strategies!"
+                    f"- **{ctx['risk_level']} risk** (score: {ctx['risk_score']:.3f})\n"
+                    f"- **{ctx['trend']}** — {ctx['growth_rate_pct']:+.1f}% vs last week\n"
+                    f"- Ranked **{ctx['rank_of_total']}** for {sel_disease}\n\n"
                 )
-            else:
-                intro = (
-                    f"👋 Hello! I'm your AI epidemiologist.\n\n"
-                    f"Available regions: {region_list}\n"
-                    f"Diseases: {disease_list} · Years: {yr_list}\n\n"
-                    f"Ask me anything about the outbreak data!"
-                )
-            st.session_state.messages = [{"role": "assistant", "content": intro}]
+            intro += (
+                "I can answer questions about:\n"
+                "- Current cases, risk levels, outbreak trends\n"
+                "- **WHO-recommended interventions** for this disease\n"
+                "- **IDSP outbreak response protocols**\n"
+                "- Cross-regional comparisons and forecasts\n\n"
+                "_Every answer is grounded in real guidelines — check the 📚 Sources below each reply._"
+            )
+            st.session_state.messages = [{"role":"assistant","content":intro,"chunks":[]}]
 
-        # Chat history
+        # Display chat history
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"], avatar="👤" if msg["role"]=="user" else "🤖"):
                 st.markdown(msg["content"])
+                if msg.get("chunks"):
+                    display_citations(msg["chunks"])
 
         # Input
         user_input = st.chat_input("Ask your AI epidemiologist...")
         if user_input:
-            st.session_state.messages.append({"role":"user","content":user_input})
+            st.session_state.messages.append({"role":"user","content":user_input,"chunks":[]})
             try:
-                full_ctx = get_rich_context(disp_df, sel_region, sel_disease, sel_year)
-                full_ctx["available_regions"]  = regions
-                full_ctx["available_diseases"] = diseases
-                full_ctx["available_years"]    = years
+                full_ctx = get_rich_context(
+                    disp_df, sel_region, sel_disease, sel_year,
+                    conversation_history=st.session_state.messages[-10:]
+                )
 
-                with st.spinner("🤔 Analysing..."):
-                    response = llm.answer_question(user_input, context=full_ctx)
-                st.session_state.messages.append({"role":"assistant","content":response})
+                with st.spinner("🔍 Searching knowledge base + generating answer..."):
+                    if rag_ready:
+                        answer, chunks = rag.answer_with_rag(
+                            question=user_input,
+                            live_context=full_ctx,
+                            llm_client=llm,
+                            top_k=4,
+                            conversation_history=st.session_state.messages[-8:],
+                        )
+                    else:
+                        # Fallback to plain LLM
+                        answer = llm.answer_question(user_input, context=full_ctx)
+                        chunks = []
+
+                st.session_state.messages.append({
+                    "role":"assistant","content":answer,"chunks":chunks
+                })
             except ConnectionError as e:
-                st.session_state.messages.append({"role":"assistant","content":f"❌ LLM not reachable: `{e}`"})
+                st.session_state.messages.append({"role":"assistant","content":f"❌ LLM not reachable: `{e}`","chunks":[]})
             except RuntimeError as e:
-                st.session_state.messages.append({"role":"assistant","content":f"❌ Generation failed: `{e}`"})
+                st.session_state.messages.append({"role":"assistant","content":f"❌ Generation failed: `{e}`","chunks":[]})
             except Exception as e:
-                st.session_state.messages.append({"role":"assistant","content":f"❌ Error: `{e}`"})
+                st.session_state.messages.append({"role":"assistant","content":f"❌ Error: `{e}`","chunks":[]})
             st.rerun()
 
     # ── TAB 2: ANALYSIS ───────────────────────────────────────────────────────
     with tab2:
         st.markdown("### 📊 Regional Analysis Dashboard")
-        fdf = disp_df[disp_df["disease"] == sel_disease]
+        fdf = disp_df[disp_df["disease"]==sel_disease]
+        lat = fdf.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1]).reset_index(drop=True)
 
-        # Cross-regional risk leaderboard
-        st.markdown("#### 🏆 Risk Leaderboard (Cross-Regional)")
-        latest_all = fdf.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1]).reset_index(drop=True)
-        latest_all = latest_all.sort_values("risk_score", ascending=False)
+        # Recompute risk on snapshot
+        ht = lat["risk_score"].quantile(0.75)
+        mt = lat["risk_score"].quantile(0.40)
+        lat["risk_level"] = lat["risk_score"].apply(
+            lambda s: "High" if s>=ht else "Medium" if s>=mt else "Low")
 
-        # ← ADD THESE 3 LINES — recompute risk levels on this snapshot
-        h_thresh = latest_all["risk_score"].quantile(0.75)
-        m_thresh = latest_all["risk_score"].quantile(0.40)
-        latest_all["risk_level"] = latest_all["risk_score"].apply(
-            lambda s: "High" if s >= h_thresh else "Medium" if s >= m_thresh else "Low"
-        )
-        
-
-        lb = px.bar(latest_all.sort_values("risk_score"),
-                    x="risk_score", y="region", color="risk_level",
-                    orientation="h",
-                    color_discrete_map={"High":"#ef4444","Medium":"#f97316","Low":"#16a34a"},
-                    text=latest_all.sort_values("risk_score")["risk_score"].round(3))
-        lb.update_layout(height=max(300,len(regions)*26),
-                         margin=dict(l=10,r=10,t=10,b=10),
-                         xaxis_title="Risk Score (0–1 cross-regional)",
-                         yaxis_title=None)
-        st.plotly_chart(lb, use_container_width=True)
-
-        c1, c2 = st.columns(2)
+        c1,c2 = st.columns(2)
         with c1:
             st.markdown("#### Risk Distribution")
-            high   = int((latest_all["risk_level"]=="High").sum())
-            medium = int((latest_all["risk_level"]=="Medium").sum())
-            low    = int((latest_all["risk_level"]=="Low").sum())
             pie = go.Figure(data=[go.Pie(
                 labels=["🔴 High","🟠 Medium","🟢 Low"],
-                values=[high, medium, low],
+                values=[(lat["risk_level"]=="High").sum(),(lat["risk_level"]=="Medium").sum(),(lat["risk_level"]=="Low").sum()],
                 marker=dict(colors=["#ef4444","#f97316","#16a34a"]))])
-            pie.update_layout(height=280, margin=dict(l=0,r=0,t=0,b=0))
-            st.plotly_chart(pie, use_container_width=True)
+            pie.update_layout(height=280,margin=dict(l=0,r=0,t=0,b=0))
+            st.plotly_chart(pie,use_container_width=True)
         with c2:
-            st.markdown("#### Cases by Region")
-            bar = go.Figure(data=[go.Bar(
-                y=latest_all["region"], x=latest_all["cases"],
-                orientation="h",
-                marker=dict(color=latest_all["risk_score"],
-                            colorscale="RdYlGn_r", showscale=True))])
-            bar.update_layout(height=280, margin=dict(l=0,r=0,t=0,b=0),
-                              xaxis_title="Cases")
-            st.plotly_chart(bar, use_container_width=True)
+            st.markdown("#### Risk Leaderboard")
+            lb = px.bar(lat.sort_values("risk_score"),x="risk_score",y="region",
+                color="risk_level",orientation="h",
+                color_discrete_map={"High":"#ef4444","Medium":"#f97316","Low":"#16a34a"})
+            lb.update_layout(height=280,margin=dict(l=0,r=0,t=0,b=0))
+            st.plotly_chart(lb,use_container_width=True)
 
-        # Year-over-year for selected region
-        if len(years) > 1 and sel_year == "All":
+        # YoY
+        if len(years)>1 and sel_year=="All":
             st.markdown(f"---\n#### 📅 Year-over-Year — {sel_region} — {sel_disease}")
             yoy = df[(df["region"]==sel_region)&(df["disease"]==sel_disease)].groupby("year")["cases"].agg(["sum","max","mean"]).reset_index()
-            yoy.columns = ["Year","Total","Peak","Avg Daily"]
-            yoy_fig = px.bar(yoy, x="Year", y="Total",
-                             color="Total", color_continuous_scale="RdYlGn_r",
-                             text="Total")
-            yoy_fig.update_layout(height=300, margin=dict(l=10,r=10,t=20,b=10))
-            st.plotly_chart(yoy_fig, use_container_width=True)
-            st.dataframe(yoy.style.format({"Total":"{:,.0f}","Peak":"{:,.0f}","Avg Daily":"{:.1f}"}),
-                         use_container_width=True, hide_index=True)
+            yoy.columns=["Year","Total","Peak","Avg Daily"]
+            yf = px.bar(yoy,x="Year",y="Total",color="Total",color_continuous_scale="RdYlGn_r",text="Total")
+            yf.update_layout(height=280,margin=dict(l=10,r=10,t=20,b=10))
+            st.plotly_chart(yf,use_container_width=True)
 
-        # Full region status table
-        st.markdown("---\n#### 📋 All Regions — Current Status")
-        table = latest_all[["region","cases","z_score","risk_score","risk_level","is_spike"]].copy()
-        table["z_score"]    = table["z_score"].round(2)
-        table["risk_score"] = table["risk_score"].round(3)
-        table["Spike"]      = table["is_spike"].map({True:"🔴 Yes",False:"🟢 No"})
-        st.dataframe(
-            table[["region","cases","z_score","risk_score","risk_level","Spike"]]
-            .sort_values("risk_score", ascending=False),
-            use_container_width=True, hide_index=True)
+        st.markdown("---\n#### 📋 Current Status — All Regions")
+        tbl = lat[["region","cases","z_score","risk_score","risk_level","is_spike"]].copy()
+        tbl["Spike"] = tbl["is_spike"].map({True:"🔴 Yes",False:"🟢 No"})
+        st.dataframe(tbl[["region","cases","z_score","risk_score","risk_level","Spike"]].sort_values("risk_score",ascending=False),
+                     use_container_width=True,hide_index=True)
 
     # ── TAB 3: TOOLS ──────────────────────────────────────────────────────────
     with tab3:
         st.markdown("### ⚙️ Quick Analysis Tools")
-        c1, c2, c3 = st.columns(3)
+
+        if rag_ready:
+            st.markdown(
+                '<span class="rag-badge">🧠 RAG Active — all analyses grounded in WHO/IDSP guidelines</span>',
+                unsafe_allow_html=True)
+            st.markdown("")
+
+        c1,c2,c3 = st.columns(3)
 
         with c1:
-            if st.button("📊 Situation Report", use_container_width=True):
+            if st.button("📊 Situation Report",use_container_width=True):
                 with st.spinner("Generating..."):
                     try:
-                        fdf   = disp_df[disp_df["disease"]==sel_disease]
-                        lates = fdf.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1])
-                        ctx_r = {
-                            "disease": sel_disease, "year": sel_year,
-                            "total_regions": len(regions),
-                            "high_risk_regions": lates[lates["risk_level"]=="High"]["region"].tolist(),
-                            "medium_risk_regions": lates[lates["risk_level"]=="Medium"]["region"].tolist(),
-                            "total_cases_today": int(lates["cases"].sum()),
-                            "national_avg_cases": round(float(lates["cases"].mean()),1),
-                            "max_cases_region": lates.loc[lates["cases"].idxmax()]["region"],
-                            "max_cases_value": int(lates["cases"].max()),
-                        }
-                        resp = llm.generate_report(ctx_r)
-                        st.markdown(resp)
+                        fdf2 = disp_df[disp_df["disease"]==sel_disease]
+                        lts  = fdf2.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1])
+                        q    = f"Generate a comprehensive situation report for {sel_disease} across all regions. Include total cases, high-risk regions, trends, and recommendations."
+                        ctx2 = get_rich_context(disp_df,sel_region,sel_disease,sel_year)
+                        ctx2["all_regions_summary"] = lts[["cases","risk_score"]].to_dict()
+                        if rag_ready:
+                            ans,cks = rag.answer_with_rag(q,ctx2,llm,top_k=5)
+                        else:
+                            ans,cks = llm.generate_report(ctx2), []
+                        st.markdown(ans)
+                        display_citations(cks)
                     except Exception as e:
                         st.error(f"Error: {e}")
 
         with c2:
-            if st.button("⚠️ High-Risk Alert", use_container_width=True):
+            if st.button("⚠️ High-Risk Regions",use_container_width=True):
                 with st.spinner("Scanning..."):
                     try:
-                        fdf   = disp_df[disp_df["disease"]==sel_disease]
-                        lates = fdf.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1])
-                        high  = lates[lates["risk_level"]=="High"][["region","cases","risk_score","z_score"]]
-                        if not high.empty:
-                            st.error(f"🔴 **{len(high)} High-Risk Region(s) detected!**")
-                            for _, row in high.iterrows():
-                                st.markdown(f"""
-                                **{row['region']}** — {int(row['cases'])} cases
-                                · Risk: {row['risk_score']:.3f} · Z-score: {row['z_score']:.2f}
-                                """)
-                            resp = llm.answer_question(
-                                "These regions are HIGH RISK right now. Give urgent public health recommendations for each.",
-                                context={"high_risk_regions": high.to_dict("records"), "disease": sel_disease})
-                            st.markdown(resp)
+                        fdf2 = disp_df[disp_df["disease"]==sel_disease]
+                        lts  = fdf2.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1])
+                        ht2  = lts["risk_score"].quantile(0.75)
+                        high = lts[lts["risk_score"]>=ht2]
+                        q    = f"These regions have HIGH risk for {sel_disease}: {high['region'].tolist() if 'region' in high.columns else list(high.index)}. What immediate interventions does WHO/IDSP recommend?"
+                        ctx2 = get_rich_context(disp_df,sel_region,sel_disease,sel_year)
+                        ctx2["high_risk_regions"] = high[["cases","risk_score"]].to_dict()
+                        if rag_ready:
+                            ans,cks = rag.answer_with_rag(q,ctx2,llm,top_k=5)
                         else:
-                            st.success("✅ No high-risk regions detected.")
+                            ans,cks = llm.answer_question(q,context=ctx2), []
+                        st.markdown(ans)
+                        display_citations(cks)
                     except Exception as e:
                         st.error(f"Error: {e}")
 
         with c3:
-            if st.button("🔄 Compare Regions", use_container_width=True):
-                with st.spinner("Comparing..."):
+            if st.button("💊 Intervention Guide",use_container_width=True):
+                with st.spinner("Fetching guidelines..."):
                     try:
-                        fdf   = disp_df[disp_df["disease"]==sel_disease]
-                        lates = fdf.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1])
-                        comp  = {
-                            "disease":  sel_disease,
-                            "year":     sel_year,
-                            "regions":  lates[["region","cases","risk_score","risk_level","z_score"]].to_dict("records"),
-                            "highest_burden": lates.loc[lates["cases"].idxmax()]["region"],
-                            "lowest_burden":  lates.loc[lates["cases"].idxmin()]["region"],
-                            "national_avg":   round(float(lates["cases"].mean()),1),
-                        }
-                        resp = llm.answer_question(
-                            "Compare all regions. Which are most/least affected? "
-                            "What patterns do you see? Give specific numbers.",
-                            context=comp)
-                        st.markdown(resp)
+                        q   = f"Based on WHO and IDSP guidelines, what are the specific intervention steps for a {sel_disease} outbreak with z-score {ctx.get('z_score','N/A')} in {sel_region}? Include vector control, treatment, and public health measures."
+                        ctx2 = get_rich_context(disp_df,sel_region,sel_disease,sel_year)
+                        if rag_ready:
+                            ans,cks = rag.answer_with_rag(q,ctx2,llm,top_k=5)
+                        else:
+                            ans,cks = llm.answer_question(q,context=ctx2), []
+                        st.markdown(ans)
+                        display_citations(cks)
                     except Exception as e:
                         st.error(f"Error: {e}")
 
         st.markdown("---\n### 🎯 Custom Analysis")
         opts = {
-            "Intervention Recommendations": "Based on current risk data, what specific interventions do you recommend for each high-risk region? Be concrete and region-specific.",
-            "Trend Analysis":               "Analyse trends in detail. Which regions are worsening fastest? Which are improving? Use the numbers provided.",
-            "Root Cause Analysis":          "Based on climate data (temperature, humidity, rainfall) and case counts, what environmental factors may be driving outbreaks in the highest-risk regions?",
-            "Year-over-Year Analysis":      "Compare disease burden across years. Is the situation improving or worsening? Which years had the worst outbreaks?",
-            "Resource Allocation Advice":   "If you had to prioritise limited health resources across these regions, which 3 regions need immediate attention and why?",
+            "WHO Intervention Recommendations": f"Based on WHO guidelines, what interventions are recommended for {sel_disease} at the current risk level in {sel_region}?",
+            "Climate-Disease Correlation Analysis": f"Based on the climate data (temperature {ctx.get('avg_temp','N/A')}°C, humidity {ctx.get('avg_humidity','N/A')}%), how does this affect {sel_disease} transmission risk?",
+            "Outbreak Response Protocol": f"Walk me through the step-by-step IDSP outbreak response protocol for {sel_disease} in {sel_region} given z-score {ctx.get('z_score','N/A')}.",
+            "Resource Allocation Advice": "Based on risk scores, how should we prioritize health resources across all monitored regions?",
+            "Year-over-Year Analysis": f"Analyse disease burden trends for {sel_disease} across all available years. Is the situation improving?",
+            "Compare with Similar Past Outbreaks": f"Have there been similar {sel_disease} outbreaks in the data? What happened and what was effective?",
         }
-        analysis_type = st.selectbox("Select analysis:", list(opts.keys()))
-        if st.button("🚀 Run Analysis", use_container_width=True):
-            with st.spinner("Running..."):
+        analysis_type = st.selectbox("Select analysis:",list(opts.keys()))
+        if st.button("🚀 Run Analysis",use_container_width=True):
+            with st.spinner("Running RAG analysis..."):
                 try:
-                    fdf   = disp_df[disp_df["disease"]==sel_disease]
-                    lates = fdf.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1])
-                    run_ctx = {
-                        "disease":          sel_disease,
-                        "year":             sel_year,
-                        "regions_data":     lates[["region","cases","risk_score","risk_level","z_score","temperature","humidity","rainfall"]].to_dict("records"),
-                        "national_avg":     round(float(lates["cases"].mean()),1),
-                        "high_risk_count":  int((lates["risk_level"]=="High").sum()),
-                        "total_cases_today":int(lates["cases"].sum()),
-                    }
-                    resp = llm.answer_question(opts[analysis_type], context=run_ctx)
-                    st.markdown(resp)
+                    q    = opts[analysis_type]
+                    ctx2 = get_rich_context(disp_df,sel_region,sel_disease,sel_year)
+                    fdf2 = disp_df[disp_df["disease"]==sel_disease]
+                    lts  = fdf2.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1])
+                    ctx2["all_regions_risk"] = lts[["cases","risk_score","z_score"]].to_dict()
+                    if rag_ready:
+                        ans,cks = rag.answer_with_rag(q,ctx2,llm,top_k=5)
+                    else:
+                        ans,cks = llm.answer_question(q,context=ctx2), []
+                    st.markdown(ans)
+                    display_citations(cks)
                 except Exception as e:
                     st.error(f"Error: {e}")
 
         st.markdown("""
         <div style="text-align:center;color:#9ca3af;font-size:.85rem;padding:2rem 0">
-            🩺 <strong>EpiPulse AI v2.1</strong> · Powered by Groq + Llama
+            🩺 <strong>EpiPulse AI v3.0</strong> · RAG + Groq + Llama · Grounded in WHO & IDSP guidelines
         </div>""", unsafe_allow_html=True)
 
 
