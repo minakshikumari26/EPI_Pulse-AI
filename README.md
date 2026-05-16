@@ -26,7 +26,7 @@ dashboard/
   Home.py                 # Multipage entrypoint and landing page
   chat.py                 # Main RAG chat implementation
   app.py                  # Main analytics implementation
-  Pages/
+  pages/
     1_chat.py             # Wrapper that runs chat.main()
     2_Analytics.py        # Wrapper that runs app.main()
 ```
@@ -69,7 +69,7 @@ EPI_Pulse_AI/
     Home.py                         # Streamlit multipage entrypoint
     app.py                          # Analytics dashboard implementation
     chat.py                         # RAG chat implementation
-    Pages/
+    pages/
       1_chat.py                     # Streamlit page wrapper for chat.py
       2_Analytics.py                # Streamlit page wrapper for app.py
   data/

@@ -139,7 +139,7 @@ with feature_cols[0]:
         "Use the AI epidemiology assistant to ask about cases, risk levels, trends, "
         "WHO-style interventions, IDSP response steps, and source-backed guidance. "
         "It also shows the selected region snapshot beside the conversation.",
-        "Pages/1_chat.py",
+        "pages/1_chat.py",
         "Open Chat",
     )
 
@@ -150,7 +150,7 @@ with feature_cols[1]:
         "Explore the outbreak dashboard with filters, risk leaderboards, case trends, "
         "spike detection, disease breakdowns, year-over-year comparison, and a 7-day "
         "case projection.",
-        "Pages/2_Analytics.py",
+        "pages/2_Analytics.py",
         "Open Analytics",
     )
 
