@@ -157,6 +157,24 @@ def plot_trend(df, region, disease):
     return fig
 
 
+# ── Snapshot helpers ──────────────────────────────────────────────────────────
+def latest_region_snapshot(df: pd.DataFrame, disease: str) -> pd.DataFrame:
+    """Return the latest available row for each region without groupby.apply quirks."""
+    required = ["region", "date", "cases", "risk_score", "z_score", "risk_level", "is_spike"]
+    cols = [c for c in required if c in df.columns]
+    if not {"region", "date", "disease"}.issubset(df.columns):
+        return pd.DataFrame(columns=cols)
+    fdf = df[df["disease"] == disease].copy()
+    if fdf.empty:
+        return pd.DataFrame(columns=cols)
+    return (
+        fdf.sort_values(["region", "date"])
+        .groupby("region", as_index=False, sort=False)
+        .tail(1)
+        .reset_index(drop=True)
+    )
+
+
 # ── RAG init (cached) ─────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading RAG knowledge base...")
 def init_rag():
@@ -421,8 +439,9 @@ def main():
     # ── TAB 2: ANALYSIS ───────────────────────────────────────────────────────
     with tab2:
         st.markdown("### 📊 Regional Analysis Dashboard")
-        fdf = disp_df[disp_df["disease"]==sel_disease]
-        lat = fdf.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1]).reset_index(drop=True)
+        lat = latest_region_snapshot(disp_df, sel_disease)
+        if lat.empty:
+            st.info(f"No regional records available for {sel_disease} with the current filters.")
 
         # Recompute risk on snapshot
         ht = lat["risk_score"].quantile(0.75)
@@ -478,8 +497,7 @@ def main():
             if st.button("📊 Situation Report",use_container_width=True):
                 with st.spinner("Generating..."):
                     try:
-                        fdf2 = disp_df[disp_df["disease"]==sel_disease]
-                        lts  = fdf2.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1])
+                        lts  = latest_region_snapshot(disp_df, sel_disease)
                         q    = f"Generate a comprehensive situation report for {sel_disease} across all regions. Include total cases, high-risk regions, trends, and recommendations."
                         ctx2 = get_rich_context(disp_df,sel_region,sel_disease,sel_year)
                         ctx2["all_regions_summary"] = lts[["cases","risk_score"]].to_dict()
@@ -496,8 +514,7 @@ def main():
             if st.button("⚠️ High-Risk Regions",use_container_width=True):
                 with st.spinner("Scanning..."):
                     try:
-                        fdf2 = disp_df[disp_df["disease"]==sel_disease]
-                        lts  = fdf2.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1])
+                        lts  = latest_region_snapshot(disp_df, sel_disease)
                         ht2  = lts["risk_score"].quantile(0.75)
                         high = lts[lts["risk_score"]>=ht2]
                         q    = f"These regions have HIGH risk for {sel_disease}: {high['region'].tolist() if 'region' in high.columns else list(high.index)}. What immediate interventions does WHO/IDSP recommend?"
@@ -542,8 +559,7 @@ def main():
                 try:
                     q    = opts[analysis_type]
                     ctx2 = get_rich_context(disp_df,sel_region,sel_disease,sel_year)
-                    fdf2 = disp_df[disp_df["disease"]==sel_disease]
-                    lts  = fdf2.groupby("region").apply(lambda x: x.sort_values("date").iloc[-1])
+                    lts  = latest_region_snapshot(disp_df, sel_disease)
                     ctx2["all_regions_risk"] = lts[["cases","risk_score","z_score"]].to_dict()
                     if rag_ready:
                         ans,cks = rag.answer_with_rag(q,ctx2,llm,top_k=5)
