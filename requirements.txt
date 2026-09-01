@@ -17,6 +17,7 @@ python-dotenv
 requests
 prometheus-client
 groq
+httpx
 # RAG dependencies
 chromadb
 sentence-transformers

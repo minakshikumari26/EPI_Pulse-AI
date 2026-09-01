@@ -2,7 +2,7 @@
 
 ## Overview
 
-EpiPulse AI is a comprehensive public-health analytics platform designed for tracking disease case trends, detecting outbreak spikes, forecasting short-term case counts, and estimating regional risk. The system integrates machine learning models, real-time data processing, API services, interactive dashboards, and enterprise-grade deployment capabilities.
+EpiPulse AI is a public-health analytics platform for tracking disease case trends, detecting outbreak spikes, forecasting short-term case counts, and estimating regional risk. The system integrates machine learning models, an Airflow-orchestrated Kafka + Postgres pipeline, a FastAPI backend, an interactive Streamlit dashboard, and a retrieval-augmented LLM chat.
 
 The platform processes synthetic disease data across 8 Indian regions (Delhi, Mumbai, Bengaluru, Chennai, Kolkata, Hyderabad, Ahmedabad, Pune) with features including cases, temperature, humidity, and rainfall. It provides anomaly detection, forecasting, risk scoring, geospatial visualization, and LLM-powered explanations.
 
@@ -47,10 +47,8 @@ graph TB
         Airflow[airflow/outbreak_pipeline.py]
     end
 
-    subgraph "Monitoring & Tracking"
+    subgraph "Experiment Tracking"
         MLflow[mlflow_tracking/]
-        Monitoring[monitoring/]
-        Logs[logs/]
     end
 
     subgraph "LLM Integration"
@@ -58,17 +56,12 @@ graph TB
         LLMConfig[configs/config.yaml - LLM Settings]
     end
 
-    subgraph "Deployment"
-        Docker[docker/ - Dockerfiles]
-        K8s[k8s/ - Kubernetes Manifests]
-        Compose[docker-compose.yml]
-    end
-
     CSV --> Preprocessing
     Preprocessing --> FeatureEng
     FeatureEng --> DB
     DB --> API
     API --> Dashboard
+    Airflow --> Producer
     Producer --> Kafka
     Kafka --> Consumer
     Consumer --> DB
@@ -79,12 +72,9 @@ graph TB
     RiskScoring --> Alerting
     Alerting --> API
     Geospatial --> Dashboard
-    Monitoring --> Logs
     MLflow --> Forecasting
     Ollama --> API
     API --> LLMConfig
-    Docker --> Compose
-    Compose --> K8s
 ```
 
 ## Core Components and File Descriptions
@@ -100,7 +90,7 @@ graph TB
 
 ### Processing and ML Layer
 - **`src/preprocessing/clean_data.py`**: Loads CSV data, removes duplicates, fills missing numeric values, and parses dates.
-- **`src/preprocessing/feature_engineing.py`**: Creates region-wise rolling averages, lag features, and growth-rate calculations.
+- **`src/preprocessing/feature_engineering.py`**: Creates region-wise rolling averages, lag features, and growth-rate calculations.
 - **`src/preprocessing/preprocess.py`**: Main preprocessing pipeline combining cleaning and feature engineering.
 - **`src/anomaly_detection/detect_spikes.py`**: Implements z-score based spike detection for outbreak identification.
 - **`src/anomaly_detection/isolation_forest_detector.py`**: Multivariate anomaly detection using Isolation Forest algorithm.
@@ -127,19 +117,20 @@ graph TB
 
 ### Messaging and Streaming
 - **`kafka/producer.py`**: Kafka producer for publishing disease event data to message streams.
-- **`kafka/consumer.py`**: Kafka consumer for processing streaming disease data and updating the database.
+- **`kafka/consumer.py`**: Kafka consumer with a bounded `consume_and_persist()` used by the Airflow `consume_to_postgres` task to write events into PostgreSQL.
 
 ### Orchestration and Workflow
-- **`airflow/outbreak_pipeline.py`**: Apache Airflow DAG for orchestrating daily outbreak detection and forecasting pipelines.
+- **`airflow/outbreak_pipeline.py`**: Apache Airflow DAG (`epipulse_pipeline`) threading Kafka + Postgres through preprocessing, spike detection, and forecasting.
+- **`database/ingest.py`**: Truncates `disease_records` and reloads from the CSV; called by the `seed_postgres` Airflow task.
 
-### Monitoring and Experiment Tracking
-- **`mlflow_tracking/train_with_tracking.py`**: MLflow integration for experiment tracking and model versioning.
-- **`monitoring/logger.py`**: Centralized logging configuration with rotating file handlers.
-- **`logs/`**: Directory for application log files.
+### Experiment Tracking
+- **`mlflow_tracking/train_with_tracking.py`**: MLflow benchmark that trains ARIMA and Prophet on a train window and logs MAE/RMSE against a held-out 30-day window per region.
 
 ### LLM Integration
-- **`src/llm/ollama_client.py`**: Client for interacting with Ollama LLM service for generating explanations and insights.
-- **`src/llm/__init__.py`**: LLM module initialization.
+- **`src/llm/llm_client.py`**: Unified `BaseLLMClient` with Groq and Ollama providers and model-fallback handling.
+- **`src/llm/ollama_client.py`**: Ollama-specific implementation.
+- **`src/rag/knowledge_base.py`**: ChromaDB + sentence-transformers store seeded with WHO/IDSP guidance.
+- **`src/rag/retriever.py`**: Retrieves top-k chunks and builds citation-aware LLM prompts.
 
 ### Utilities
 - **`src/utils/config.py`**: Configuration loading and path resolution utilities.
@@ -157,16 +148,8 @@ graph TB
 - **`notebooks/lesson_04_anomaly_detection.ipynb`**: Spike and anomaly detection methods.
 - **`notebooks/lesson_05_forecasting.ipynb`**: Time series forecasting with ARIMA and Prophet.
 - **`notebooks/lesson_06_dashboard_and_api.ipynb`**: Building the dashboard and API.
-- **`notebooks/lesson_07_alerting_geospatial_and_docker.ipynb`**: Alerting, geospatial viz, and containerization.
-- **`notebooks/lesson_08_enterprise_layer.ipynb`**: Enterprise features including Kafka, Airflow, and Kubernetes.
-
-### Deployment
-- **`docker/Dockerfile.api`**: Docker configuration for the API service.
-- **`docker/Dockerfile.dashboard`**: Docker configuration for the dashboard service.
-- **`docker-compose.yml`**: Multi-service Docker Compose setup including API, dashboard, PostgreSQL, Redis, Kafka, and Ollama.
-- **`k8s/api-deployment.yaml`**: Kubernetes deployment manifest for the API service.
-- **`k8s/dashboard-deployment.yaml`**: Kubernetes deployment manifest for the dashboard service.
-- **`k8s/postgres-deployment.yaml`**: Kubernetes deployment for PostgreSQL database.
+- **`notebooks/lesson_07_alerting_geospatial_and_docker.ipynb`**: Alerting and geospatial visualization walkthrough.
+- **`notebooks/lesson_08_enterprise_layer.ipynb`**: Enterprise features including Kafka, Airflow, and MLflow.
 
 ### Dependencies and Requirements
 - **`requirements.txt`**: Core Python dependencies for the application.
@@ -204,11 +187,10 @@ graph TB
 - **Orchestration**: Apache Airflow
 - **ML Frameworks**: scikit-learn, statsmodels, prophet, TensorFlow/Keras
 - **Visualization**: Streamlit, Plotly, Matplotlib, Folium
-- **LLM**: Ollama with local models (Llama, Mistral)
+- **LLM**: Groq (cloud) and Ollama (local)
+- **RAG**: ChromaDB + sentence-transformers
 - **Experiment Tracking**: MLflow
-- **Monitoring**: Prometheus, custom logging
-- **Containerization**: Docker, Docker Compose
-- **Orchestration**: Kubernetes
+- **Monitoring**: Prometheus metrics endpoint
 - **Development**: Jupyter Notebooks, pytest
 
 ## Key Workflows
@@ -237,4 +219,4 @@ graph TB
 3. Dashboard renders charts and maps
 4. LLM provides contextual explanations
 
-This architecture provides a scalable, modular system for epidemic intelligence with both real-time and batch processing capabilities, suitable for both development and enterprise deployment.
+This architecture provides a modular system for epidemic intelligence combining batch analytics, streaming ingest, and retrieval-augmented explanations.

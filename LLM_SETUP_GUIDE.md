@@ -6,7 +6,6 @@ This guide explains how to set up and use the local LLM (Ollama) integration wit
 
 ### Prerequisites
 - Python 3.9+
-- Docker & Docker Compose (optional, for containerized setup)
 - 8GB+ RAM (4GB minimum for Mistral model)
 - 10GB+ free disk space
 
@@ -14,7 +13,7 @@ This guide explains how to set up and use the local LLM (Ollama) integration wit
 
 ## 📦 Installation
 
-### Option 1: Local Ollama Setup (Recommended for Development)
+### Local Ollama Setup
 
 #### Step 1: Install Ollama
 Download and install from: https://ollama.ai
@@ -51,60 +50,6 @@ llm:
   model: mistral  # or your chosen model
   timeout: 60
   temperature: 0.7
-```
-
----
-
-### Option 2: Docker Compose Setup
-
-#### Step 1: Start all services including Ollama
-```bash
-docker-compose up -d
-```
-
-#### Step 2: Pull model into container
-```bash
-docker exec epipulse-ollama ollama pull mistral
-```
-
-#### Step 3: Verify
-```bash
-docker logs epipulse-ollama
-```
-
----
-
-### Option 3: GPU-Accelerated Setup (NVIDIA)
-
-For faster inference on NVIDIA GPUs:
-
-#### Step 1: Install NVIDIA Docker Runtime
-```bash
-# Ubuntu/Debian
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
-curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
-curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | \
-  sudo tee /etc/apt/sources.list.d/nvidia-docker.list
-sudo apt-get update && sudo apt-get install -y nvidia-docker2
-sudo systemctl restart docker
-```
-
-#### Step 2: Uncomment GPU section in docker-compose.yml
-```yaml
-ollama:
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            count: 1
-            capabilities: [gpu]
-```
-
-#### Step 3: Start services
-```bash
-docker-compose up -d
-docker exec epipulse-ollama ollama pull mistral
 ```
 
 ---
@@ -247,11 +192,7 @@ curl -X POST http://localhost:11434/api/generate \
 
 ### Monitor Ollama Logs
 ```bash
-# Local
 tail -f ~/.ollama/logs/server.log
-
-# Docker
-docker logs -f epipulse-ollama
 ```
 
 ---
@@ -300,17 +241,6 @@ ollama list          # verify installation
 1. Use smaller model: `ollama pull orca-mini`
 2. Reduce timeout in config.yaml
 3. Restart Ollama to free memory: `pkill ollama && ollama serve`
-4. Enable GPU acceleration (see Option 3 above)
-
-### Issue: Docker container won't start
-
-**Solution:**
-```bash
-docker-compose down
-docker-compose up -d ollama
-docker exec epipulse-ollama ollama pull mistral
-docker logs epipulse-ollama  # check logs
-```
 
 ---
 
@@ -320,15 +250,11 @@ docker logs epipulse-ollama  # check logs
    - Orca Mini (3B) - Fastest
    - Mistral (7B) - Best balance (recommended)
 
-2. **Use GPU for better quality:**
-   - Enable NVIDIA acceleration
-   - Use larger models: Neural Chat, Dolphin Mixtral
-
-3. **Caching for repeated queries:**
+2. **Caching for repeated queries:**
    - Ollama caches loaded models in memory
    - First request is slower, subsequent ones are faster
 
-4. **Batch API calls:**
+3. **Batch API calls:**
    - Use `/llm/summarize` for bulk analysis
    - Reduces overhead vs individual `/llm/question` calls
 

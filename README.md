@@ -15,7 +15,8 @@ EpiPulse AI is a full-stack MLOps project for tracking disease trends, detecting
 | Anomaly Detection | Z-score and Isolation Forest based outbreak signal detection. |
 | Risk Scoring | Weighted risk score based on cases, humidity, and rainfall. |
 | API Backend | FastAPI endpoints for cases, risk, spikes, forecasts, and predictions. |
-| MLOps Layer | Docker, Kubernetes manifests, Kafka, Airflow, MLflow, and monitoring scaffolding. |
+| Pipeline | Airflow DAG threading Kafka producer/consumer → Postgres ingest → preprocessing → spike detection → ARIMA forecast. |
+| Experiment Tracking | MLflow runs comparing ARIMA vs Prophet on a held-out 30-day window per region. |
 
 ## Dashboard Pages
 
@@ -62,7 +63,7 @@ EPI_Pulse_AI/
     schemas/
       prediction_schema.py          # Pydantic request/response models
   airflow/
-    outbreak_pipeline.py            # Daily outbreak pipeline DAG
+    outbreak_pipeline.py            # Airflow DAG (Kafka + Postgres + preprocess/detect/forecast)
   configs/
     config.yaml                     # Central app, model, data, and service config
   dashboard/
@@ -76,22 +77,13 @@ EPI_Pulse_AI/
     disease_data.csv                # Main synthetic disease dataset
   database/
     db.py                           # SQLAlchemy session and base setup
-    db_connection.py                # Database engine factory
+    ingest.py                       # CSV → Postgres reload used by Airflow
     models.py                       # ORM table models
-  docker/
-    Dockerfile.api                  # API container image
-    Dockerfile.dashboard            # Dashboard container image
-  k8s/
-    api-deployment.yaml             # API Kubernetes deployment
-    dashboard-deployment.yaml       # Dashboard Kubernetes deployment
-    postgres-deployment.yaml        # PostgreSQL Kubernetes deployment
   kafka/
     producer.py                     # Disease event producer
-    consumer.py                     # Disease event consumer
+    consumer.py                     # Consumer with consume_and_persist() → Postgres
   mlflow_tracking/
-    train_with_tracking.py          # MLflow training/experiment script
-  monitoring/
-    logger.py                       # Monitoring logger setup
+    train_with_tracking.py          # ARIMA vs Prophet MLflow benchmark
   notebooks/
     lesson_01_project_overview.ipynb
     lesson_02_data_and_preprocessing.ipynb
@@ -137,11 +129,9 @@ EPI_Pulse_AI/
     test_api_routes.py              # API tests
     test_core_workflows.py          # Data/model workflow tests
     test_llm_client.py              # LLM client tests
-  docker-compose.yml                # Local multi-service setup
   generate_dataset.py               # Dataset generator
-  requirements.txt                  # Core Python dependencies
-  requirements-dev.txt              # Development/test dependencies
-  requirements-enterprise.txt       # Optional enterprise dependencies
+  requirements.txt                  # Core Python dependencies (includes test deps)
+  requirements-enterprise.txt       # Optional enterprise dependencies (mlflow, airflow, kafka-python)
 ```
 
 ## Quick Start
@@ -243,17 +233,30 @@ python -m unittest discover -s tests
 python test_rag.py
 ```
 
-## Docker
+## Pipeline
 
-```bash
-docker compose up --build
+The Airflow DAG `epipulse_pipeline` (in `airflow/outbreak_pipeline.py`) runs:
+
+```
+seed_postgres → produce_events → consume_to_postgres → preprocess → detect_outbreaks → train_forecast_model
 ```
 
-Services:
+Prerequisites: a running PostgreSQL instance on `localhost:5432` and a Kafka broker on `localhost:9094`. Install the enterprise deps and launch Airflow standalone:
 
-- Dashboard: Streamlit on port `8501`
-- API: FastAPI on port `8000`
-- Database: PostgreSQL on port `5432`
+```bash
+pip install -r requirements-enterprise.txt
+airflow standalone
+# Then trigger dag_id=epipulse_pipeline in the Airflow UI
+```
+
+## MLflow experiment
+
+Benchmark ARIMA vs Prophet on a held-out 30-day window for Delhi and log runs:
+
+```bash
+python mlflow_tracking/train_with_tracking.py
+mlflow ui   # inspect runs at http://localhost:5000
+```
 
 ## License
 
